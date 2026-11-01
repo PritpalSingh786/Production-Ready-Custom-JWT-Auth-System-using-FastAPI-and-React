@@ -27,6 +27,7 @@ from app.utils.tokens import (
     secure_verify_password_reset_token, delete_secure_password_reset_token
 )
 import asyncio
+from fastapi import Response 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -99,19 +100,14 @@ def verify_email(request: Request, user_id: str | None = None, token: str | None
     return templates.TemplateResponse("users/email_verification_success.html", {"request": request, "user_id": user.user_id, "email": user.email})
 
 @router.post("/login/", response_model=LoginResponse)
-def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.user_id == payload.userId).first()
     
-    # bcrypt se password verify karne ka naya tareeka
     is_password_valid = False
     if user:
         try:
-            # Database ka hashed password (string) ko bytes mein convert karo
             stored_hash = user.hashed_password.encode('utf-8')
-            # User ka input password bhi bytes mein convert karo
             input_password = payload.password.encode('utf-8')
-            
-            # Verify karo
             is_password_valid = bcrypt.checkpw(input_password, stored_hash)
         except Exception as e:
             print(f"Bcrypt verify error: {e}")
@@ -135,15 +131,41 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     refresh_token = create_refresh_token(user, device_id=str(device.device_id), platform=payload.platform)
     store_refresh_token(refresh_token, user, device_id=str(device.device_id), platform=payload.platform)
 
-    return LoginResponse(
-        access=access_token,
-        refresh=refresh_token,
-        user=LoginUserData(id=user.id, userId=user.user_id, email=user.email)
-    )
+    user_data = LoginUserData(id=user.id, userId=user.user_id, email=user.email)
+
+    if payload.platform == "web":
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=False,       # Production mein True karna
+            samesite="lax",
+            max_age=settings.REFRESH_TOKEN_LIFETIME * 24 * 60 * 60, # 15 days
+            path="/api/users/"
+        )
+        return LoginResponse(
+            access=access_token,
+            user=user_data,
+            refresh="Token sent via HttpOnly Cookie"
+        )
+    else:
+        return LoginResponse(
+            access=access_token,
+            user=user_data,
+            refresh=refresh_token
+        )
 
 @router.post("/token/refresh/", response_model=RefreshResponse)
-def refresh_token(payload: RefreshRequest):
-    token_payload = decode_token(payload.refresh, "refresh")
+def refresh_token(payload: RefreshRequest, request: Request, response: Response):
+    if payload.platform == "web":
+        refresh_token_val = request.cookies.get("refresh_token")
+    else:
+        refresh_token_val = payload.refresh
+
+    if not refresh_token_val:
+        raise HTTPException(401, detail="Refresh token missing")
+
+    token_payload = decode_token(refresh_token_val, "refresh")
     if not token_payload:
         raise HTTPException(401, detail="Invalid or expired refresh token")
     
@@ -160,16 +182,44 @@ def refresh_token(payload: RefreshRequest):
 
     dummy_user = DummyUser(user_id)
     new_access = create_access_token(dummy_user, device_id=token_payload.get("device_id"), platform=payload.platform)
-    return RefreshResponse(access=new_access, refresh=payload.refresh)
+
+    if payload.platform == "web":
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token_val,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=settings.REFRESH_TOKEN_LIFETIME * 24 * 60 * 60,
+            path="/api/users/"
+        )
+        return RefreshResponse(
+            access=new_access, 
+            refresh="Token sent via HttpOnly Cookie"
+        )
+    else:
+        return RefreshResponse(
+            access=new_access, 
+            refresh=refresh_token_val
+        )
 
 @router.post("/logout/", response_model=LogoutResponse)
-def logout(payload: LogoutRequest):
-    if payload.refresh:
-        token_payload = decode_token(payload.refresh, "refresh")
+def logout(payload: LogoutRequest, request: Request, response: Response):
+    if payload.platform == "web":
+        refresh_token_val = request.cookies.get("refresh_token")
+    else:
+        refresh_token_val = payload.refresh
+
+    if refresh_token_val:
+        token_payload = decode_token(refresh_token_val, "refresh")
         if token_payload:
             user_id = token_payload["user_id"]
             jti = token_payload["jti"]
             redis_client.hdel(f"hash-rt-for-user-{user_id}", jti)
+    
+    if payload.platform == "web":
+        response.delete_cookie(key="refresh_token", path="/api/users/")
+    
     return LogoutResponse(message="Successfully logged out")
 
 @router.get("/authenticated/", response_model=AuthenticatedResponse)

@@ -37,7 +37,7 @@ class LoginUserData(BaseModel):
 class LoginResponse(BaseModel):
     access: str
     user: LoginUserData
-    refresh: Optional[str] = None
+    refresh: Optional[str] = None 
 
 class RefreshRequest(BaseModel):
     refresh: Optional[str] = None
