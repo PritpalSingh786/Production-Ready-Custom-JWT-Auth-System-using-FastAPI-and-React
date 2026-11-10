@@ -419,8 +419,8 @@ def login(
             httponly=True,
             secure=not settings.DEBUG,
             samesite="lax",
-            max_age=60,
-            # max_age=settings.REFRESH_TOKEN_LIFETIME * 86400,
+            # max_age=60,
+            max_age=settings.REFRESH_TOKEN_LIFETIME * 86400,
             path="/api/users/",
         )
 

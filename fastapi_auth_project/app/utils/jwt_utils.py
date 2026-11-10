@@ -71,7 +71,7 @@ def create_refresh_token(
         "platform": platform,
         "type": "refresh",
         "ver": token_version,
-        "exp": now + timedelta(minutes=settings.REFRESH_TOKEN_LIFETIME),
+        "exp": now + timedelta(days=settings.REFRESH_TOKEN_LIFETIME),
         "iat": now,
         "iss": settings.JWT_ISSUER,
         "aud": settings.JWT_AUDIENCE,
