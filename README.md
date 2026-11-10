@@ -13,7 +13,8 @@ The application provides:
 - User registration and email verification.
 - Login with a short-lived JWT access token.
 - Refresh-token based session continuation.
-- Refresh-token rotation and server-side session tracking in Redis.
+- Refresh-token rotation and Redis allowlist-based refresh-session revocation.
+- User-wide token-version invalidation; no separate per-access-JWT blacklist is maintained.
 - Secure web refresh/logout requests with CSRF protection.
 - Protected APIs.
 - Forgot-password and password-reset flows.
@@ -188,6 +189,26 @@ When a refresh request arrives, the backend:
 8. Sends the replacement refresh token as a new HttpOnly cookie.
 
 This is **refresh-token rotation**. A previously used refresh token is no longer present in the session hash.
+
+#### Token blacklisting vs. token revocation — what this project implements
+
+The terms *blacklisting* and *revocation* are often used together, but they are not exactly the same implementation. This project uses a Redis-backed refresh-session allowlist plus a token-version check. It does **not** maintain a separate blacklist entry for every access JWT ever issued.
+
+There are two complementary controls:
+
+1. **Per-session refresh-token revocation (Redis allowlist):** the backend accepts a refresh token only when its `jti` exists in `hash-rt-for-user-<user_id>`. During refresh, it stores the replacement token's `jti` and removes the old one. During logout, it removes the current refresh token's `jti`. A token whose `jti` is missing is rejected, even if its JWT expiry time has not yet passed.
+2. **User-wide token-version revocation:** access and refresh JWTs contain a `ver` claim. The backend compares it with `token-version:<user_id>`. When the version is incremented (for example, after a password change), tokens carrying the previous version are rejected. This invalidates older sessions for that user without creating one blacklist record per JWT.
+
+| Action | What the backend changes | Effect |
+|---|---|---|
+| Refresh | Stores new refresh `jti`, then deletes old refresh `jti` | Old refresh token cannot be reused; this is rotation |
+| Logout | Deletes the current refresh `jti` from the user's Redis hash | That refresh session cannot be refreshed again |
+| Password change / version increment | Increments `token-version:<user_id>` | Previously issued access and refresh tokens with an older `ver` are rejected |
+| JWT expiry | JWT validation rejects an expired token | Token cannot be used after its expiry time |
+
+**Important distinction:** logout removes the refresh-session record. It does not, by itself, add the access JWT to a per-token blacklist. An already-issued access token may therefore remain usable until it expires, unless another check (such as a token-version change or account-status check) rejects it. Keep access-token lifetime short to limit this window. If immediate access-token invalidation on every individual logout is a requirement, add an access-token denylist (for example, store revoked access-token `jti` values in Redis until each token's expiry and check that denylist in the authentication dependency).
+
+So the accurate description for this codebase is: **refresh-token rotation + Redis allowlist-based refresh-session revocation + user-wide token-version invalidation** — not a conventional per-access-token blacklist.
 
 The Redis hash receives an expiry based on `REFRESH_TOKEN_LIFETIME` (in days). The current helper applies the expiry to the user's hash.
 
