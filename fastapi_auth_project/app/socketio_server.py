@@ -7,7 +7,10 @@ redis_manager = socketio.AsyncRedisManager(settings.REDIS_URL)
 sio = socketio.AsyncServer(
     async_mode="asgi",
     client_manager=redis_manager,
-    cors_allowed_origins=[settings.DATABASE_URL],
+    cors_allowed_origins=[
+    "http://localhost:3000",
+    settings.DOMAIN_URL,
+    ],
     logger=False,
     engineio_logger=False,
 )

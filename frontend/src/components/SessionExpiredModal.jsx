@@ -1,2 +1,29 @@
-import { Clock3, ShieldAlert } from 'lucide-react';
-export default function SessionExpiredModal({ onContinue }) { return <div className="modal-backdrop"><section className="session-modal" role="dialog" aria-modal="true" aria-labelledby="expired-title"><div className="modal-icon"><Clock3 size={25}/></div><span className="modal-kicker">SECURITY NOTICE</span><h2 id="expired-title">Your session has timed out</h2><p>Your refresh session has expired or is no longer valid. For your security, please sign in again to continue.</p><button className="primary-btn full-btn" onClick={onContinue}>Continue to sign in <span>→</span></button><div className="modal-safe"><ShieldAlert size={14}/> Your account remains protected</div></section></div>; }
+import { Clock3, ShieldAlert } from "lucide-react";
+export default function SessionExpiredModal({ onContinue }) {
+  return (
+    <div className="modal-backdrop">
+      <section
+        className="session-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="expired-title"
+      >
+        <div className="modal-icon">
+          <Clock3 size={25} />
+        </div>
+        <span className="modal-kicker">SECURITY NOTICE</span>
+        <h2 id="expired-title">Your session has timed out</h2>
+        <p>
+          Your refresh session has expired or is no longer valid. For your
+          security, please sign in again to continue.
+        </p>
+        <button className="primary-btn full-btn" onClick={onContinue}>
+          Continue to sign in <span>→</span>
+        </button>
+        <div className="modal-safe">
+          <ShieldAlert size={14} /> Your account remains protected
+        </div>
+      </section>
+    </div>
+  );
+}
