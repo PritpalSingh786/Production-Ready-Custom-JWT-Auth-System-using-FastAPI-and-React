@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.redis_client import redis_client
-from app.utils.jwt_utils import decode_token, get_token_version
+from app.utils.jwt_utils import decode_token, get_token_version, is_token_blacklisted
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -42,6 +42,19 @@ async def get_current_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
+        )
+
+    # Reject access tokens explicitly revoked by logout or another security action.
+    try:
+        if is_token_blacklisted(payload.get("jti", "")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token revoked. Please login again.",
+            )
+    except redis.RedisError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable",
         )
 
     user_id = payload.get("user_id")

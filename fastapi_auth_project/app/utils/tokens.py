@@ -8,7 +8,7 @@ from app.redis_client import redis_client
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def store_refresh_token(refresh_token_str, user, device_id=None, platform="web", device_name="", ip_address="") -> bool:
+def store_session_metadata(refresh_token_str, user, device_id=None, platform="web", device_name="", ip_address="") -> bool:
     try:
         payload = jwt.decode(
             refresh_token_str,
@@ -17,7 +17,7 @@ def store_refresh_token(refresh_token_str, user, device_id=None, platform="web",
             audience=settings.JWT_AUDIENCE,
             issuer=settings.JWT_ISSUER,
         )
-        user_tokens_key = f"hash-rt-for-user-{user.id}"
+        sessions_key = f"sessions-for-user-{user.id}"
         token_data = {
             "jti": payload.get("jti"),
             "user_id": str(user.id),
@@ -27,8 +27,8 @@ def store_refresh_token(refresh_token_str, user, device_id=None, platform="web",
             "ip_address": ip_address,
             "created_at": _utcnow().isoformat(),
         }
-        redis_client.hset(user_tokens_key, payload.get("jti"), json.dumps(token_data))
-        redis_client.expire(user_tokens_key, settings.REFRESH_TOKEN_LIFETIME * 86400)
+        redis_client.hset(sessions_key, payload.get("jti"), json.dumps(token_data))
+        redis_client.expire(sessions_key, settings.REFRESH_TOKEN_LIFETIME * 86400)
         return True
     except Exception as e:
         print(f"Error storing token: {e}")

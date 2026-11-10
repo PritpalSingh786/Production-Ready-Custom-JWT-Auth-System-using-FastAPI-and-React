@@ -29,6 +29,25 @@ def increment_token_version(user_id) -> int:
     return redis_client.incr(f"token-version:{user_id}")
 
 
+def blacklist_token_payload(payload: dict) -> bool:
+    """Store a revoked JWT JTI in Redis until its original expiry."""
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if not jti or not exp:
+        return False
+    remaining = int(float(exp) - _now().timestamp())
+    if remaining <= 0:
+        return True  # An already-expired token needs no blacklist entry.
+    # NX makes refresh-token rotation single-use even under concurrent requests.
+    return bool(redis_client.set(
+        f"token-blacklist:{jti}", "1", ex=remaining, nx=True
+    ))
+
+
+def is_token_blacklisted(jti: str) -> bool:
+    return bool(redis_client.exists(f"token-blacklist:{jti}"))
+
+
 def create_access_token(
     user,
     device_id=None,

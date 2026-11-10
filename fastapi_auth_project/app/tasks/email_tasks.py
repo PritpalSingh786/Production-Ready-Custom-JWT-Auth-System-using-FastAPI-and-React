@@ -84,7 +84,7 @@ def send_logout_notification_task(user_id, device_id, message):
 
 @shared_task(name="app.tasks.email_tasks.logout_all_devices_task")
 def logout_all_devices_task(user_id, excluded_device_id=None):
-    key = f"hash-rt-for-user-{user_id}"
+    key = f"sessions-for-user-{user_id}"
     all_tokens = redis_client.hgetall(key)
     redis_client.delete(key)
 

@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 import bcrypt
+import redis
 
 from fastapi import (
     APIRouter,
@@ -57,6 +58,8 @@ from app.utils.jwt_utils import (
     decode_token,
     get_token_version,
     increment_token_version,
+    blacklist_token_payload,
+    is_token_blacklisted,
 )
 
 from app.utils.csrf import (
@@ -66,7 +69,7 @@ from app.utils.csrf import (
 )
 
 from app.utils.tokens import (
-    store_refresh_token,
+    store_session_metadata,
     generate_verification_token,
     verify_email_token,
     delete_verify_email_token,
@@ -399,7 +402,7 @@ def login(
     )
 
     # Store refresh token in Redis.
-    if not store_refresh_token(
+    if not store_session_metadata(
         refresh_token,
         user,
         device_id=device_id,
@@ -525,6 +528,12 @@ def refresh_token(
     user_id = token_payload["user_id"]
     old_jti = token_payload["jti"]
 
+    try:
+        if is_token_blacklisted(old_jti):
+            raise HTTPException(401, detail="Refresh token has been revoked. Please login again.")
+    except redis.RedisError:
+        raise HTTPException(503, detail="Authentication service temporarily unavailable")
+
     # Check current token version.
     current_version = get_token_version(user_id)
 
@@ -535,32 +544,27 @@ def refresh_token(
             detail="Session revoked. Please login again.",
         )
 
-    key = f"hash-rt-for-user-{user_id}"
+    # Atomically consume the old refresh token before issuing replacements.
+    # Redis SET NX prevents two simultaneous refresh requests from both succeeding.
+    try:
+        if not blacklist_token_payload(token_payload):
+            raise HTTPException(401, detail="Refresh token has already been used. Please login again.")
+    except redis.RedisError:
+        raise HTTPException(503, detail="Authentication service temporarily unavailable")
+
+    key = f"sessions-for-user-{user_id}"
 
     old_data = redis_client.hget(
         key,
         old_jti,
     )
 
-    if not old_data:
-
-        raise HTTPException(
-            401,
-            detail="Session expired. Please login again.",
-        )
-
-    try:
-
-        token_info = json.loads(old_data)
-
-    except (TypeError, json.JSONDecodeError):
-
-        redis_client.hdel(key, old_jti)
-
-        raise HTTPException(
-            401,
-            detail="Invalid session data. Please login again.",
-        )
+    token_info = {}
+    if old_data:
+        try:
+            token_info = json.loads(old_data)
+        except (TypeError, json.JSONDecodeError):
+            token_info = {}
 
     user = db.query(User).filter(
         User.id == user_id,
@@ -593,7 +597,7 @@ def refresh_token(
     )
 
     # Store replacement refresh token first.
-    if not store_refresh_token(
+    if not store_session_metadata(
         new_refresh,
         user,
         device_id=device_id,
@@ -607,8 +611,11 @@ def refresh_token(
             detail="Could not rotate session. Please try again.",
         )
 
-    # Remove old refresh token.
-    redis_client.hdel(key, old_jti)
+    # Old refresh token is already blacklisted (atomically) above.
+    try:
+        redis_client.hdel(key, old_jti)
+    except redis.RedisError:
+        raise HTTPException(503, detail="Could not finish session rotation. Please try again.")
 
     if payload.platform == "web":
 
@@ -665,10 +672,31 @@ def logout(
             and token_payload.get("platform") == payload.platform
         ):
 
-            redis_client.hdel(
-                f"hash-rt-for-user-{token_payload['user_id']}",
-                token_payload["jti"],
-            )
+            try:
+                blacklist_token_payload(token_payload)
+                redis_client.hdel(
+                    f"sessions-for-user-{token_payload['user_id']}",
+                    token_payload["jti"],
+                )
+            except redis.RedisError:
+                raise HTTPException(
+                    503,
+                    detail="Could not revoke refresh token. Please try again.",
+                )
+
+    # Revoke the current access token as well (frontend sends its Bearer token).
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        access_token = authorization.split(" ", 1)[1].strip()
+        access_payload = decode_token(access_token, "access")
+        if access_payload:
+            try:
+                blacklist_token_payload(access_payload)
+            except redis.RedisError:
+                raise HTTPException(
+                    503,
+                    detail="Could not revoke access token. Please try again.",
+                )
 
     if payload.platform == "web":
 
