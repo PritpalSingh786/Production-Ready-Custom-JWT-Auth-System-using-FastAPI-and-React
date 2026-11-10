@@ -1,0 +1,4 @@
+import { ShieldCheck, LockKeyhole, Sparkles } from 'lucide-react';
+export default function AuthLayout({ title, subtitle, children, footer }) {
+  return <div className="auth-page"><div className="auth-glow glow-one"/><div className="auth-glow glow-two"/><div className="auth-wrap"><div className="auth-brand"><span className="brand-icon"><ShieldCheck size={22}/></span><span>Auth<span className="brand-accent">Flow</span></span><span className="brand-tag">SECURE BY DESIGN</span></div><div className="auth-card"><div className="auth-card-top"><div className="auth-symbol"><LockKeyhole size={20}/></div><div className="mini-badge"><Sparkles size={12}/> SECURE ACCESS</div></div><h1>{title}</h1><p className="auth-subtitle">{subtitle}</p>{children}{footer && <div className="auth-footer">{footer}</div>}</div><div className="auth-footnote"><ShieldCheck size={14}/> Your information is encrypted and protected</div></div></div>;
+}

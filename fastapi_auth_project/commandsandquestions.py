@@ -22,6 +22,9 @@ environment variables.
 # docker compose logs -f web    
 # Show live logs (prints, API requests, errors) of the web container in real-time.
 
+# docker stop quote_video_web-web-1
+# docker ps
+# docker rm -f pgadmin
 '''
 
 **`@shared_task`**

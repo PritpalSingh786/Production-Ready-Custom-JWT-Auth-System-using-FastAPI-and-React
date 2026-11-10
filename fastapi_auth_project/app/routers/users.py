@@ -1,295 +1,418 @@
+import json
+import uuid
+from datetime import datetime, timezone
+
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-import bcrypt  # <-- passlib ki jagah bcrypt import kiya
 from sqlalchemy.orm import Session
 
 from app.auth.jwt_auth import AuthContext, get_current_auth
 from app.config import settings
 from app.database import get_db
+from app.limiter import limiter
 from app.models.user import User, Device
 from app.redis_client import redis_client
 from app.schemas.user import (
     RegisterRequest, RegisterResponse, RegisterResponseData,
     LoginRequest, LoginResponse, LoginUserData,
-    RefreshRequest, RefreshResponse,
-    LogoutRequest, LogoutResponse,
+    RefreshRequest, RefreshResponse, LogoutRequest, LogoutResponse,
     ForgotPasswordRequest, ForgotPasswordResponse,
-    PasswordChangeRequest, PasswordChangeResponse,
-    SecurePasswordChangeRequest,
+    PasswordChangeRequest, PasswordChangeResponse, SecurePasswordChangeRequest,
     AuthenticatedResponse, AuthenticatedUser,
 )
-from app.tasks.email_tasks import send_email_task, logout_all_devices_task
+from app.tasks.email_tasks import (
+    send_email_task, send_forgot_password_email_task,
+    send_new_login_alert_task, send_password_changed_email_task,
+    logout_all_devices_task,
+)
 from app.utils.jwt_utils import create_access_token, create_refresh_token, decode_token
 from app.utils.tokens import (
-    store_refresh_token, generate_verification_token, verify_email_token, delete_verify_email_token,
-    generate_password_reset_token, verify_password_reset_token, delete_password_reset_token,
-    secure_verify_password_reset_token, delete_secure_password_reset_token
+    store_refresh_token, generate_verification_token, verify_email_token,
+    delete_verify_email_token, generate_password_reset_token,
+    verify_password_reset_token, delete_password_reset_token,
+    secure_generate_password_reset_token, secure_verify_password_reset_token,
+    delete_secure_password_reset_token,
 )
-import asyncio
-from fastapi import Response 
 
 router = APIRouter()
+pages_router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _check_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return request.client.host if request.client else None
+
 
 def _send_verification_email(user: User) -> bool:
     try:
         token = generate_verification_token(user.id)
-
-        link = f"{settings.DOMAIN_URL}/api/users/verify-email/?user_id={user.user_id}&token={token}"
-
-        message = f"Hello {user.user_id},\n\nPlease verify your email: {link}"
-
-        result = send_email_task.delay(
-            "Verify Your Email",
-            message,
-            [user.email]
+        link = (
+            f"{settings.DOMAIN_URL}/api/users/verify-email/"
+            f"?user_id={user.user_id}&token={token}"
         )
-
-        print("Celery task ID:", result.id)
-
+        message = (
+            f"Hello {user.user_id},\n\n"
+            f"Please verify your email address using this link (expires in 5 minutes):\n{link}"
+        )
+        send_email_task.delay("Verify Your Email - 5 Minutes Expiry", message, [user.email])
         return True
-
-    except Exception as e:
-        print(f"Celery submission error: {e}")
+    except Exception:
         return False
 
-@router.post("/register/", response_model=RegisterResponse, status_code=201)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+
+def _render_error(request: Request, template: str, message: str):
+    return templates.TemplateResponse(
+        template, {"request": request, "message": message}, status_code=400
+    )
+
+
+@router.post("/register/", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("3/minute")
+def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.user_id.ilike(payload.user_id)).first():
         raise HTTPException(400, detail={"user_id": "userId already exists"})
-    if db.query(User).filter(User.email.ilike(payload.email)).first():
+    if db.query(User).filter(User.email.ilike(str(payload.email))).first():
         raise HTTPException(400, detail={"email": "Email already exists"})
-
-    # Password ko bytes mein convert karke hash karo
-    password_bytes = payload.password.encode('utf-8')
-    hashed_password_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
-    hashed_password = hashed_password_bytes.decode('utf-8') # DB mein save karne ke liye string mein decode kiya
 
     user = User(
         user_id=payload.user_id,
-        email=payload.email,
-        hashed_password=hashed_password,
+        email=str(payload.email).lower(),
+        hashed_password=_hash_password(payload.password),
         is_active=False,
         email_verified=False,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    print( _send_verification_email(user), "error")
-    _send_verification_email(user)
 
-    print("success api")
+    if not _send_verification_email(user):
+        # Account remains created; user can request a fresh link by trying to log in.
+        message = "Registration successful, but verification email could not be queued. Please try logging in to resend it."
+    else:
+        message = "Registration successful. Please check your email for verification link (expires in 5 minutes)."
 
     return RegisterResponse(
         success=True,
-        message="Registration successful. Check your email.",
+        message=message,
         data=RegisterResponseData(user_id=user.user_id, email=user.email),
     )
 
+
 @router.get("/verify-email/", response_class=HTMLResponse)
-def verify_email(request: Request, user_id: str | None = None, token: str | None = None, db: Session = Depends(get_db)):
+def verify_email(
+    request: Request,
+    user_id: str | None = None,
+    token: str | None = None,
+    db: Session = Depends(get_db),
+):
+    if not user_id or not token:
+        return _render_error(request, "users/email_verification_error.html", "Verification link is incomplete.")
+
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user or not verify_email_token(user.id, token):
-        return templates.TemplateResponse("users/email_verification_error.html", {"request": request, "message": "Invalid token"}, status_code=400)
+        return _render_error(request, "users/email_verification_error.html", "Verification link has expired or is invalid.")
 
     user.email_verified = True
     user.is_active = True
     db.commit()
     delete_verify_email_token(user.id, token)
-    return templates.TemplateResponse("users/email_verification_success.html", {"request": request, "user_id": user.user_id, "email": user.email})
+    return templates.TemplateResponse(
+        "users/email_verification_success.html",
+        {"request": request, "user_id": user.user_id, "email": user.email},
+    )
+
 
 @router.post("/login/", response_model=LoginResponse)
-def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.user_id == payload.userId).first()
-    
-    is_password_valid = False
-    if user:
-        try:
-            stored_hash = user.hashed_password.encode('utf-8')
-            input_password = payload.password.encode('utf-8')
-            is_password_valid = bcrypt.checkpw(input_password, stored_hash)
-        except Exception as e:
-            print(f"Bcrypt verify error: {e}")
-            is_password_valid = False
-
-    if not user or not is_password_valid:
+@limiter.limit("5/minute")
+def login(
+    request: Request,
+    payload: LoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.user_id == payload.userId, User.is_deleted.is_(False)).first()
+    if not user or not _check_password(payload.password, user.hashed_password):
         raise HTTPException(400, detail="Invalid credentials")
 
-    if not user.email_verified:
-        raise HTTPException(400, detail="Email not verified.")
+    if not user.email_verified or not user.is_active:
+        _send_verification_email(user)
+        raise HTTPException(
+            400,
+            detail="Email not verified. A verification link has been sent to your email. Please verify your email before logging in.",
+        )
 
-    device_name = request.headers.get("user-agent", "Unknown")
-    device = db.query(Device).filter(Device.user_id == user.id, Device.device_name == device_name).first()
+    device_name = request.headers.get("user-agent", "Unknown")[:255]
+    ip_address = _client_ip(request)
+    device = db.query(Device).filter(
+        Device.user_id == user.id,
+        Device.device_name == device_name,
+        Device.is_deleted.is_(False),
+    ).first()
+
     if not device:
-        device = Device(user_id=user.id, device_name=device_name)
+        device = Device(
+            user_id=user.id,
+            device_name=device_name,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=ip_address,
+            is_active=True,
+        )
         db.add(device)
-        db.commit()
-        db.refresh(device)
+    else:
+        device.ip_address = ip_address
+        device.user_agent = request.headers.get("user-agent")
+        device.is_active = True
+        device.last_login = datetime.now(timezone.utc)
 
-    access_token = create_access_token(user, device_id=str(device.device_id), platform=payload.platform)
-    refresh_token = create_refresh_token(user, device_id=str(device.device_id), platform=payload.platform)
-    store_refresh_token(refresh_token, user, device_id=str(device.device_id), platform=payload.platform)
+    user.last_login = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(device)
+
+    device_id = str(device.device_id)
+    access_token = create_access_token(user, device_id=device_id, platform=payload.platform)
+    refresh_token = create_refresh_token(user, device_id=device_id, platform=payload.platform)
+
+    if not store_refresh_token(
+        refresh_token, user, device_id=device_id, platform=payload.platform,
+        device_name=device_name, ip_address=ip_address or "",
+    ):
+        raise HTTPException(503, detail="Could not create session. Please try again.")
+
+    # Matches the Django behavior: each successful login triggers a security alert.
+    secure_token = secure_generate_password_reset_token(user.id)
+    try:
+        send_new_login_alert_task.delay(
+            user_email=user.email,
+            user_id=str(user.id),
+            userId=user.user_id,
+            device_name=device_name,
+            ip_address=ip_address or "Unknown",
+            platform=payload.platform,
+            reset_token=secure_token,
+        )
+    except Exception:
+        # Login should not fail only because the alert worker is temporarily unavailable.
+        pass
 
     user_data = LoginUserData(id=user.id, userId=user.user_id, email=user.email)
-
     if payload.platform == "web":
         response.set_cookie(
             key="refresh_token",
             value=refresh_token,
             httponly=True,
-            secure=False,       # Production mein True karna
+            secure=not settings.DEBUG,
             samesite="lax",
-            max_age=settings.REFRESH_TOKEN_LIFETIME * 24 * 60 * 60, # 15 days
-            path="/api/users/"
+            max_age=settings.REFRESH_TOKEN_LIFETIME * 86400,
+            path="/api/users/",
         )
-        return LoginResponse(
-            access=access_token,
-            user=user_data,
-            refresh="Token sent via HttpOnly Cookie"
-        )
-    else:
-        return LoginResponse(
-            access=access_token,
-            user=user_data,
-            refresh=refresh_token
-        )
+        return LoginResponse(access=access_token, user=user_data, refresh="Token sent via HttpOnly Cookie")
+
+    return LoginResponse(access=access_token, user=user_data, refresh=refresh_token)
+
 
 @router.post("/token/refresh/", response_model=RefreshResponse)
-def refresh_token(payload: RefreshRequest, request: Request, response: Response):
-    if payload.platform == "web":
-        refresh_token_val = request.cookies.get("refresh_token")
-    else:
-        refresh_token_val = payload.refresh
-
-    if not refresh_token_val:
+def refresh_token(
+    payload: RefreshRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    token_value = request.cookies.get("refresh_token") if payload.platform == "web" else payload.refresh
+    if not token_value:
         raise HTTPException(401, detail="Refresh token missing")
 
-    token_payload = decode_token(refresh_token_val, "refresh")
+    token_payload = decode_token(token_value, "refresh")
     if not token_payload:
         raise HTTPException(401, detail="Invalid or expired refresh token")
-    
-    user_id = token_payload["user_id"]
-    jti = token_payload["jti"]
-    user_tokens_key = f"hash-rt-for-user-{user_id}"
-    stored_data = redis_client.hget(user_tokens_key, jti)
-    if not stored_data:
-        raise HTTPException(401, detail="Refresh token revoked or not found")
+    if token_payload.get("platform") != payload.platform:
+        raise HTTPException(401, detail="Refresh token platform mismatch")
 
-    class DummyUser:
-        def __init__(self, uid):
-            self.id = uid
+    user_id, old_jti = token_payload["user_id"], token_payload["jti"]
+    key = f"hash-rt-for-user-{user_id}"
+    old_data = redis_client.hget(key, old_jti)
+    if not old_data:
+        raise HTTPException(401, detail="Session expired. Please login again.")
 
-    dummy_user = DummyUser(user_id)
-    new_access = create_access_token(dummy_user, device_id=token_payload.get("device_id"), platform=payload.platform)
+    try:
+        token_info = json.loads(old_data)
+    except (TypeError, json.JSONDecodeError):
+        redis_client.hdel(key, old_jti)
+        raise HTTPException(401, detail="Invalid session data. Please login again.")
+
+    user = db.query(User).filter(User.id == user_id, User.is_deleted.is_(False)).first()
+    if not user or not user.is_active:
+        redis_client.hdel(key, old_jti)
+        raise HTTPException(401, detail="User account is unavailable")
+
+    device_id = token_payload.get("device_id")
+    new_access = create_access_token(user, device_id=device_id, platform=payload.platform)
+    new_refresh = create_refresh_token(user, device_id=device_id, platform=payload.platform)
+
+    if not store_refresh_token(
+        new_refresh, user, device_id=device_id, platform=payload.platform,
+        device_name=token_info.get("device_name", ""),
+        ip_address=token_info.get("ip_address", ""),
+    ):
+        raise HTTPException(503, detail="Could not rotate session. Please try again.")
+
+    # Revoke the previous refresh token only after the replacement has been stored.
+    redis_client.hdel(key, old_jti)
 
     if payload.platform == "web":
         response.set_cookie(
             key="refresh_token",
-            value=refresh_token_val,
+            value=new_refresh,
             httponly=True,
-            secure=False,
+            secure=not settings.DEBUG,
             samesite="lax",
-            max_age=settings.REFRESH_TOKEN_LIFETIME * 24 * 60 * 60,
-            path="/api/users/"
+            max_age=settings.REFRESH_TOKEN_LIFETIME * 86400,
+            path="/api/users/",
         )
-        return RefreshResponse(
-            access=new_access, 
-            refresh="Token sent via HttpOnly Cookie"
-        )
-    else:
-        return RefreshResponse(
-            access=new_access, 
-            refresh=refresh_token_val
-        )
+        return RefreshResponse(access=new_access, refresh="Token sent via HttpOnly Cookie")
+
+    return RefreshResponse(access=new_access, refresh=new_refresh)
+
 
 @router.post("/logout/", response_model=LogoutResponse)
 def logout(payload: LogoutRequest, request: Request, response: Response):
-    if payload.platform == "web":
-        refresh_token_val = request.cookies.get("refresh_token")
-    else:
-        refresh_token_val = payload.refresh
+    token_value = request.cookies.get("refresh_token") if payload.platform == "web" else payload.refresh
+    if token_value:
+        token_payload = decode_token(token_value, "refresh")
+        if token_payload and token_payload.get("platform") == payload.platform:
+            redis_client.hdel(
+                f"hash-rt-for-user-{token_payload['user_id']}",
+                token_payload["jti"],
+            )
 
-    if refresh_token_val:
-        token_payload = decode_token(refresh_token_val, "refresh")
-        if token_payload:
-            user_id = token_payload["user_id"]
-            jti = token_payload["jti"]
-            redis_client.hdel(f"hash-rt-for-user-{user_id}", jti)
-    
     if payload.platform == "web":
         response.delete_cookie(key="refresh_token", path="/api/users/")
-    
-    return LogoutResponse(message="Successfully logged out")
+    return LogoutResponse(message="Logout successful")
+
 
 @router.get("/authenticated/", response_model=AuthenticatedResponse)
 def get_authenticated_user(auth: AuthContext = Depends(get_current_auth)):
     return AuthenticatedResponse(
-        msg="Authenticated successfully",
+        msg="Welcome to authenticated view",
         user=AuthenticatedUser(id=auth.user.id, userId=auth.user.user_id, email=auth.user.email),
         device_id=auth.device_id,
         platform=auth.platform,
     )
 
+
 @router.post("/forgot-password/", response_model=ForgotPasswordResponse)
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.user_id == payload.userId).first()
+    user = db.query(User).filter(
+        User.user_id == payload.userId,
+        User.is_deleted.is_(False),
+    ).first()
+    # Keep the response generic so callers cannot enumerate accounts.
     if user:
         token = generate_password_reset_token(user.id)
-        link = f"{settings.DOMAIN_URL}/api/users/password-change/?user_id={user.user_id}&token={token}"
-        message = f"Password reset link: {link}"
-        send_email_task.delay("Password Reset", message, [user.email])
-    return ForgotPasswordResponse(success=True, message="If user exists, password reset link sent.")
+        link = f"{settings.DOMAIN_URL}/api/users/password-change-template/{user.id}/{token}/"
+        message = (
+            f"Hello {user.user_id},\n\nWe received a password reset request.\n"
+            f"Use this link within 5 minutes:\n{link}\n\n"
+            "If you did not request this, ignore this email."
+        )
+        send_forgot_password_email_task.delay("Reset Your Password", message, [user.email])
+    return ForgotPasswordResponse(success=True, message="If the account exists, a password reset link has been sent.")
+
 
 @router.post("/password-change/", response_model=PasswordChangeResponse)
 def password_change(payload: PasswordChangeRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.user_id == payload.user_id).first()
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(400, detail={"confirm_password": "Passwords do not match."})
+
+    try:
+        user_uuid = uuid.UUID(payload.user_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid user ID")
+
+    user = db.query(User).filter(User.id == user_uuid).first()
     if not user or not verify_password_reset_token(user.id, payload.token):
-        raise HTTPException(400, detail="Invalid or expired token")
+        raise HTTPException(400, detail="Invalid or expired link.")
 
-    # bcrypt se naya password hash karo
-    new_password_bytes = payload.new_password.encode('utf-8')
-    hashed_password_bytes = bcrypt.hashpw(new_password_bytes, bcrypt.gensalt())
-    user.hashed_password = hashed_password_bytes.decode('utf-8') # String mein decode karke save karo
-
+    user.hashed_password = _hash_password(payload.new_password)
     db.commit()
     delete_password_reset_token(user.id, payload.token)
-    
-    # Celery task to logout devices (agar Celery use kar rahe ho toh)
-    logout_all_devices_task.delay(str(user.id))
+    return PasswordChangeResponse(success=True, message="Password changed successfully. Now you can login.")
 
-    return PasswordChangeResponse(success=True, message="Password changed successfully")
 
 @router.post("/secure-password-change/", response_model=PasswordChangeResponse)
 def secure_password_change(payload: SecurePasswordChangeRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.user_id == payload.user_id).first()
-    
-    # 1. Current password verify karo (bcrypt se)
-    is_password_valid = False
-    if user:
-        try:
-            stored_hash = user.hashed_password.encode('utf-8')
-            input_password = payload.current_password.encode('utf-8')
-            is_password_valid = bcrypt.checkpw(input_password, stored_hash)
-        except Exception as e:
-            print(f"Bcrypt verify error: {e}")
-            is_password_valid = False
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(400, detail={"confirm_password": "New passwords do not match"})
 
-    if not user or not is_password_valid:
-        raise HTTPException(400, detail="Invalid current password")
+    try:
+        user_uuid = uuid.UUID(payload.user_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid user ID")
+
+    user = db.query(User).filter(User.id == user_uuid).first()
+    if not user or not _check_password(payload.current_password, user.hashed_password):
+        raise HTTPException(400, detail="Current password is incorrect")
 
     if not secure_verify_password_reset_token(user.id, payload.token):
         raise HTTPException(400, detail="Invalid or expired secure token")
 
-    # 2. Naya password hash karo (bcrypt se)
-    new_password_bytes = payload.new_password.encode('utf-8')
-    hashed_password_bytes = bcrypt.hashpw(new_password_bytes, bcrypt.gensalt())
-    user.hashed_password = hashed_password_bytes.decode('utf-8') # String mein decode karke DB mein save karo
-
+    user.hashed_password = _hash_password(payload.new_password)
     db.commit()
+
     delete_secure_password_reset_token(user.id, payload.token)
-    
-    # Celery task to logout devices
+    send_password_changed_email_task.delay(user.email, user.user_id)
     logout_all_devices_task.delay(str(user.id))
 
-    return PasswordChangeResponse(success=True, message="Secure password changed successfully")
+    return PasswordChangeResponse(
+        success=True,
+        message="Password changed successfully! You have been logged out from all devices.",
+        redirect="/login/",
+    )
+
+
+# Django serves these HTML pages at the domain root (not under /api/users/).
+@pages_router.get("/verify-email/", response_class=HTMLResponse)
+def verify_email_page(request: Request, user_id: str | None = None, token: str | None = None, db: Session = Depends(get_db)):
+    return verify_email(request, user_id, token, db)
+
+
+@pages_router.get("/password-change-template/{user_id}/{token}/", response_class=HTMLResponse)
+def password_change_template(request: Request, user_id: str, token: str):
+    if not verify_password_reset_token(user_id, token):
+        return _render_error(request, "users/password_change_error.html", "Invalid or expired link.")
+    return templates.TemplateResponse(
+        "users/password_change_template.html",
+        {"request": request, "user_id": user_id, "token": token},
+    )
+
+
+@pages_router.get("/secure-password-change-template/{user_id}/{token}/", response_class=HTMLResponse)
+def secure_password_change_template(request: Request, user_id: str, token: str, db: Session = Depends(get_db)):
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        return _render_error(request, "users/error.html", "Invalid or expired link. Please request a new one.")
+
+    user = db.query(User).filter(User.id == user_uuid).first()
+    if not user or not secure_verify_password_reset_token(user.id, token):
+        return _render_error(request, "users/error.html", "Invalid or expired link. Please request a new one.")
+
+    return templates.TemplateResponse(
+        "users/secure_password_change_template.html",
+        {"request": request, "user_id": user_id, "token": token},
+    )

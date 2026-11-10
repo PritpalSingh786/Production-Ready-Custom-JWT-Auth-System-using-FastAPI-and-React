@@ -7,16 +7,16 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - app_network
+    networks: [app_network]
+    restart: unless-stopped
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -31,55 +31,72 @@ services:
         condition: service_healthy
     volumes:
       - pgadmin_data:/var/lib/pgadmin
-    networks:
-      - app_network
+    networks: [app_network]
     restart: unless-stopped
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     container_name: auth_redis
     ports:
-      - "6382:6379"
-    networks:
-      - app_network
+      - "${REDIS_PORT:-6382}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks: [app_network]
+    restart: unless-stopped
 
   web:
     build:
-      context: ./fastapi_auth_project   # Dockerfile is folder ke andar hai
+      context: ./fastapi_auth_project
+      dockerfile: Dockerfile
     container_name: fastapi_app
     command: uvicorn app.main:socket_app --host 0.0.0.0 --port 8000 --reload
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
-      - ./fastapi_auth_project:/app     # Code map karo
-    env_file:
-      - .env                            # Root wali .env uthao
+      - ./fastapi_auth_project:/app
+    env_file: [.env]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-    networks:
-      - app_network
+    networks: [app_network]
+    restart: unless-stopped
 
   celery_worker:
     build:
-      context: ./fastapi_auth_project   # Same build context
+      context: ./fastapi_auth_project
+      dockerfile: Dockerfile
     container_name: celery_worker
     command: celery -A app.celery_app.celery_worker worker --loglevel=info
     volumes:
-      - ./fastapi_auth_project:/app     # Same volume mapping
-    env_file:
-      - .env                           # Root wali .env uthao
+      - ./fastapi_auth_project:/app
+    env_file: [.env]
     depends_on:
-      - redis
-      - postgres
-    networks:
-      - app_network
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks: [app_network]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: auth_frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - web
+    networks: [app_network]
+    restart: unless-stopped
 
 volumes:
   postgres_data:
   pgadmin_data:
+  redis_data:
 
 networks:
   app_network:
