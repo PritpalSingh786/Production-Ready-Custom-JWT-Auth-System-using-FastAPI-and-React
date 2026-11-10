@@ -9,38 +9,41 @@ import {
   EyeOff,
 } from "lucide-react";
 import AuthLayout from "../components/AuthLayout";
-import api from "../app/api";
+import { authAPI } from "../features/auth/authAPI";
+
 export default function Register() {
   const [form, setForm] = useState({ user_id: "", email: "", password: "" });
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
-  const nav = useNavigate();
-  const update = (e) => setForm({ ...form, [e.target.name]: e.target.value });
-  const submit = async (e) => {
-    e.preventDefault();
+  const navigate = useNavigate();
+
+  const update = (event) => {
+    setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
     setError("");
     setBusy(true);
     try {
-      const { data } = await api.post("/register/", form);
-      setSuccess(
-        data.message ||
-          "Account created. Please check your email to verify it.",
-      );
+      const data = await authAPI.register(form);
+      setSuccess(data.message || "Account created. Please verify your email.");
     } catch (err) {
-      const d = err.response?.data?.detail;
+      const detail = err.response?.data?.detail;
       setError(
-        typeof d === "string"
-          ? d
-          : d?.user_id ||
-              d?.email ||
-              "Registration failed. Please review your details.",
+        typeof detail === "string"
+          ? detail
+          : detail?.user_id ||
+            detail?.email ||
+            "Registration failed. Please review your details."
       );
     } finally {
       setBusy(false);
     }
   };
+
   return (
     <AuthLayout
       title="Create your account"
@@ -48,9 +51,7 @@ export default function Register() {
       footer={
         <>
           Already registered?{" "}
-          <Link to="/login">
-            Sign in <ArrowRight size={13} />
-          </Link>
+          <Link to="/login">Sign in <ArrowRight size={13} /></Link>
         </>
       }
     >
@@ -58,11 +59,12 @@ export default function Register() {
       {success && (
         <div className="success-alert">
           {success}{" "}
-          <button className="text-action" onClick={() => nav("/login")}>
+          <button type="button" className="text-action" onClick={() => navigate("/login")}>
             Go to sign in
           </button>
         </div>
       )}
+
       <form onSubmit={submit} className="auth-form">
         <label htmlFor="user_id">Username</label>
         <div className="input-wrap">
@@ -73,11 +75,13 @@ export default function Register() {
             value={form.user_id}
             onChange={update}
             placeholder="4+ characters, letters or numbers"
-            minLength="4"
-            maxLength="150"
+            minLength={4}
+            maxLength={150}
+            autoComplete="username"
             required
           />
         </div>
+
         <label htmlFor="email">Email address</label>
         <div className="input-wrap">
           <Mail size={17} />
@@ -92,6 +96,7 @@ export default function Register() {
             required
           />
         </div>
+
         <label htmlFor="password">Password</label>
         <div className="input-wrap">
           <LockKeyhole size={17} />
@@ -102,21 +107,17 @@ export default function Register() {
             value={form.password}
             onChange={update}
             placeholder="At least 6 characters"
-            minLength="6"
+            minLength={6}
             autoComplete="new-password"
             required
           />
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setShow(!show)}
-          >
+          <button type="button" className="icon-btn" onClick={() => setShow((v) => !v)}>
             {show ? <EyeOff size={17} /> : <Eye size={17} />}
           </button>
         </div>
+
         <button className="primary-btn" disabled={busy || !!success}>
-          {busy ? "Creating account…" : "Create account"}{" "}
-          <ArrowRight size={17} />
+          {busy ? "Creating account…" : "Create account"} <ArrowRight size={17} />
         </button>
       </form>
       <div className="trust-line centered">

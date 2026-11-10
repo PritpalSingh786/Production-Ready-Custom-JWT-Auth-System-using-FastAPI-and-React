@@ -1,4 +1,3 @@
-
 import json
 import uuid
 from datetime import datetime, timezone
@@ -60,6 +59,12 @@ from app.utils.jwt_utils import (
     increment_token_version,
 )
 
+from app.utils.csrf import (
+    generate_csrf_token,
+    validate_csrf_token,
+    CSRF_COOKIE_NAME,
+)
+
 from app.utils.tokens import (
     store_refresh_token,
     generate_verification_token,
@@ -78,6 +83,27 @@ router = APIRouter()
 pages_router = APIRouter()
 
 templates = Jinja2Templates(directory="templates")
+
+
+# --------------------------------------------------
+# CSRF TOKEN
+# --------------------------------------------------
+
+@router.get("/csrf/")
+def get_csrf_token(response: Response):
+    token = generate_csrf_token()
+
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        httponly=False,
+        secure=not settings.DEBUG,
+        samesite="lax",
+        max_age=3600,
+        path="/api/users/",
+    )
+
+    return {"csrf_token": token}
 
 
 # --------------------------------------------------
@@ -392,6 +418,8 @@ def login(
 
     try:
 
+        print("tryyyyyyyyyy")
+
         send_new_login_alert_task.delay(
             user_email=user.email,
             user_id=str(user.id),
@@ -401,6 +429,15 @@ def login(
             platform=payload.platform,
             reset_token=secure_token,
         )
+        print(send_new_login_alert_task.delay(
+                    user_email=user.email,
+                    user_id=str(user.id),
+                    userId=user.user_id,
+                    device_name=device_name,
+                    ip_address=ip_address or "Unknown",
+                    platform=payload.platform,
+                    reset_token=secure_token,
+                ))
 
     except Exception:
         pass
@@ -419,10 +456,11 @@ def login(
             httponly=True,
             secure=not settings.DEBUG,
             samesite="lax",
-            # max_age=60,
+            # max_age=120,
             max_age=settings.REFRESH_TOKEN_LIFETIME * 86400,
             path="/api/users/",
         )
+        print("helloooooooooooooooo")
 
         return LoginResponse(
             access=access_token,
@@ -448,6 +486,9 @@ def refresh_token(
     response: Response,
     db: Session = Depends(get_db),
 ):
+
+    if payload.platform == "web":
+        validate_csrf_token(request)
 
     token_value = (
         request.cookies.get("refresh_token")
@@ -603,6 +644,9 @@ def logout(
     response: Response,
 ):
 
+    if payload.platform == "web":
+        validate_csrf_token(request)
+
     token_value = (
         request.cookies.get("refresh_token")
         if payload.platform == "web"
@@ -631,6 +675,17 @@ def logout(
         response.delete_cookie(
             key="refresh_token",
             path="/api/users/",
+            secure=not settings.DEBUG,
+            httponly=True,
+            samesite="lax",
+        )
+
+        response.delete_cookie(
+            key=CSRF_COOKIE_NAME,
+            path="/api/users/",
+            secure=not settings.DEBUG,
+            httponly=False,
+            samesite="lax",
         )
 
     return LogoutResponse(

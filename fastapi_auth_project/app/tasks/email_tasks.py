@@ -19,6 +19,7 @@ def send_email_task(subject, message, recipient_list):
 def send_new_login_alert_task(
     user_email, user_id, userId, device_name, ip_address, platform, reset_token
 ):
+    print("sentttttttttt")
     reset_link = (
         f"{settings.DOMAIN_URL}/api/users/secure-password-change-template/"
         f"{user_id}/{reset_token}/"

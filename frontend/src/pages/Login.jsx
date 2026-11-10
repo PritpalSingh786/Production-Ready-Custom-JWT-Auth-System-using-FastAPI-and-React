@@ -1,43 +1,82 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useDispatch } from "react-redux";
-import { Eye, EyeOff, ArrowRight, UserRound, LockKeyhole } from "lucide-react";
+import { useDispatch, useSelector } from "react-redux";
+import {
+  ArrowRight,
+  Eye,
+  EyeOff,
+  LockKeyhole,
+  UserRound,
+} from "lucide-react";
 import AuthLayout from "../components/AuthLayout";
-import api, { resetExpiryNotice } from "../app/api";
-import { setCredentials, setUser } from "../features/auth/authSlice";
+import { authAPI } from "../features/auth/authAPI";
+import {
+  clearMessages,
+  loginSuccess,
+  setError,
+  setLoading,
+} from "../features/auth/authSlice";
+import { resetExpiryNotice } from "../app/api";
+
 export default function Login() {
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { isLoading, error, isAuthenticated, successMessage } = useSelector(
+    (state) => state.auth
+  );
+
   const [form, setForm] = useState({ userId: "", password: "" });
-  const [show, setShow] = useState(false);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const dispatch = useDispatch(),
-    navigate = useNavigate(),
-    location = useLocation();
-  const update = (e) => setForm({ ...form, [e.target.name]: e.target.value });
-  const submit = async (e) => {
-    e.preventDefault();
-    setError("");
-    setBusy(true);
+  const [showPassword, setShowPassword] = useState(false);
+
+  useEffect(() => {
+    dispatch(clearMessages());
+    if (location.state?.message) {
+      // The message is shown from router state below.
+    }
+  }, [dispatch, location.key]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [isAuthenticated, navigate]);
+
+  const update = (event) => {
+    setForm((current) => ({
+      ...current,
+      [event.target.name]: event.target.value,
+    }));
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    dispatch(clearMessages());
+    dispatch(setLoading(true));
+
     try {
-      const { data } = await api.post("/login/", { ...form, platform: "web" });
-      dispatch(setCredentials({ access: data.access, user: data.user }));
-      dispatch(setUser(data.user));
-      sessionStorage.setItem("authflow-had-session", "1");
+      const data = await authAPI.login(form);
+
+      // Login only stores the access token. The refresh token is an
+      // HttpOnly cookie set by FastAPI; do not call refresh after login.
+      dispatch(loginSuccess({ access: data.access, user: data.user }));
       resetExpiryNotice();
-      navigate("/", { replace: true });
+      navigate("/dashboard", { replace: true });
     } catch (err) {
-      const d = err.response?.data?.detail;
-      setError(
-        typeof d === "string"
-          ? d
-          : d?.user_id ||
-              d?.email ||
-              "Unable to sign in. Please check your details.",
-      );
+      const detail = err.response?.data?.detail;
+      const message =
+        typeof detail === "string"
+          ? detail
+          : detail?.user_id ||
+            detail?.email ||
+            err.response?.data?.message ||
+            "Login failed. Please check your username and password.";
+      dispatch(setError(message));
     } finally {
-      setBusy(false);
+      dispatch(setLoading(false));
     }
   };
+
   return (
     <AuthLayout
       title="Welcome back"
@@ -54,7 +93,9 @@ export default function Login() {
       {location.state?.message && (
         <div className="success-alert">{location.state.message}</div>
       )}
+      {successMessage && <div className="success-alert">{successMessage}</div>}
       {error && <div className="error-alert">{error}</div>}
+
       <form onSubmit={submit} className="auth-form">
         <label htmlFor="userId">Username</label>
         <div className="input-wrap">
@@ -69,6 +110,7 @@ export default function Login() {
             required
           />
         </div>
+
         <div className="label-row">
           <label htmlFor="password">Password</label>
           <Link to="/forgot-password">Forgot password?</Link>
@@ -78,7 +120,7 @@ export default function Login() {
           <input
             id="password"
             name="password"
-            type={show ? "text" : "password"}
+            type={showPassword ? "text" : "password"}
             value={form.password}
             onChange={update}
             placeholder="Enter your password"
@@ -88,16 +130,18 @@ export default function Login() {
           <button
             type="button"
             className="icon-btn"
-            onClick={() => setShow(!show)}
-            aria-label={show ? "Hide password" : "Show password"}
+            onClick={() => setShowPassword((value) => !value)}
+            aria-label={showPassword ? "Hide password" : "Show password"}
           >
-            {show ? <EyeOff size={17} /> : <Eye size={17} />}
+            {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
           </button>
         </div>
-        <button className="primary-btn" disabled={busy}>
-          {busy ? "Signing in…" : "Sign in securely"} <ArrowRight size={17} />
+
+        <button className="primary-btn" disabled={isLoading}>
+          {isLoading ? "Signing in…" : "Sign in securely"} <ArrowRight size={17} />
         </button>
       </form>
+
       <div className="form-divider">
         <span /> <small>SECURE AUTHENTICATION</small> <span />
       </div>

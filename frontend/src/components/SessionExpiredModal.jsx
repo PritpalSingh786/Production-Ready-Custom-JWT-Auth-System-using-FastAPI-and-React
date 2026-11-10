@@ -1,4 +1,5 @@
 import { Clock3, ShieldAlert } from "lucide-react";
+
 export default function SessionExpiredModal({ onContinue }) {
   return (
     <div className="modal-backdrop">
@@ -8,9 +9,7 @@ export default function SessionExpiredModal({ onContinue }) {
         aria-modal="true"
         aria-labelledby="expired-title"
       >
-        <div className="modal-icon">
-          <Clock3 size={25} />
-        </div>
+        <div className="modal-icon"><Clock3 size={25} /></div>
         <span className="modal-kicker">SECURITY NOTICE</span>
         <h2 id="expired-title">Your session has timed out</h2>
         <p>
