@@ -1,0 +1,426 @@
+{
+  "info": {
+    "_postman_id": "a9cb4c28-4ad5-4e7f-90bd-2e6adbb0a511",
+    "name": "FastAPI JWT Auth + CSRF",
+    "description": "Postman collection generated from the uploaded FastAPI project. Web auth uses HttpOnly refresh_token cookie plus signed double-submit CSRF cookie/header. Keep Postman's cookie jar enabled. Run Get CSRF Token before Refresh and Logout.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/users",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "your_user_id",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "you@example.com",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "your_password",
+      "type": "string"
+    },
+    {
+      "key": "newPassword",
+      "value": "your_new_password",
+      "type": "string"
+    },
+    {
+      "key": "userUuid",
+      "value": "USER_UUID_FROM_LOGIN_OR_DATABASE",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "csrfToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "emailVerificationToken",
+      "value": "TOKEN_FROM_EMAIL",
+      "type": "string"
+    },
+    {
+      "key": "passwordResetToken",
+      "value": "TOKEN_FROM_EMAIL",
+      "type": "string"
+    },
+    {
+      "key": "securePasswordToken",
+      "value": "SECURE_TOKEN_FROM_EMAIL_OR_FLOW",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Web Authentication",
+      "item": [
+        {
+          "name": "1. Get CSRF Token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/csrf/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "csrf"
+              ]
+            },
+            "description": "Run before web refresh/logout. Postman cookie jar stores csrf_token automatically; response script stores token for X-CSRF-Token header."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.csrf_token) pm.collectionVariables.set('csrfToken', data.csrf_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. Register",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/register/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "register"
+              ]
+            },
+            "description": "Creates an inactive account and queues email verification.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{userId}}\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Verify Email (link/query)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/verify-email/?user_id={{userId}}&token={{emailVerificationToken}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "verify-email",
+                "?user_id={{userId}}&token={{emailVerificationToken}}"
+              ]
+            },
+            "description": "Use the user_id and token from the verification email. Opens an HTML result."
+          },
+          "response": []
+        },
+        {
+          "name": "4. Login (Web)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/login/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "login"
+              ]
+            },
+            "description": "Web login sets refresh_token as HttpOnly cookie. Keep Postman cookie handling enabled; access token is saved automatically.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"password\": \"{{password}}\",\n  \"platform\": \"web\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.access) pm.collectionVariables.set('accessToken', data.access);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Authenticated User",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/authenticated/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "authenticated"
+              ]
+            },
+            "description": "Protected endpoint. Uses accessToken saved from Login/Refresh.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "6. Refresh Token (Web + CSRF)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/token/refresh/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "token",
+                "refresh"
+              ]
+            },
+            "description": "First run Get CSRF Token. Postman must send refresh_token and csrf_token cookies. The request rotates the refresh cookie and saves the new access token.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"platform\": \"web\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.access) pm.collectionVariables.set('accessToken', data.access);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Logout (Web + CSRF)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/logout/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "logout"
+              ]
+            },
+            "description": "First run Get CSRF Token. Sends refresh_token + csrf_token cookies, revokes refresh session, and deletes both cookies.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"platform\": \"web\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Password Management",
+      "item": [
+        {
+          "name": "8. Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/forgot-password/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "forgot-password"
+              ]
+            },
+            "description": "Queues a password reset email if the account exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "9. Password Change (Reset Link)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/password-change/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "password-change"
+              ]
+            },
+            "description": "Use user UUID and reset token from email. Revokes existing JWT sessions.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{userUuid}}\",\n  \"token\": \"{{passwordResetToken}}\",\n  \"new_password\": \"{{newPassword}}\",\n  \"confirm_password\": \"{{newPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "10. Secure Password Change",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/secure-password-change/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "secure-password-change"
+              ]
+            },
+            "description": "Requires user UUID, current password, and secure token supplied by the secure password-change flow. Revokes all sessions.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{userUuid}}\",\n  \"token\": \"{{securePasswordToken}}\",\n  \"current_password\": \"{{password}}\",\n  \"new_password\": \"{{newPassword}}\",\n  \"confirm_password\": \"{{newPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "11. Secure Password Change Page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/secure-password-change-template/{{userUuid}}/{{securePasswordToken}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "secure-password-change-template",
+                "{{userUuid}}",
+                "{{securePasswordToken}}"
+              ]
+            },
+            "description": "HTML page for secure password-change token."
+          },
+          "response": []
+        },
+        {
+          "name": "12. Password Change Page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/password-change-template/{{userUuid}}/{{passwordResetToken}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "password-change-template",
+                "{{userUuid}}",
+                "{{passwordResetToken}}"
+              ]
+            },
+            "description": "HTML page opened from password-reset email."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
